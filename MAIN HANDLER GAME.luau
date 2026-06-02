@@ -1,8 +1,14 @@
+-- =============================================================================
+-- SERVICIOS CENTRALES DE ROBLOX
+-- =============================================================================
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TeleportService = game:GetService("TeleportService")
-local DataStoreService = game:GetService("DataStoreService")
+local TeleportService = game:GetService("TeleportService") -- Gestiona el viaje entre servidores/lugares
+local DataStoreService = game:GetService("DataStoreService") -- Servicio de base de datos en la nube
 
+-- =============================================================================
+-- EVENTOS DE RED AND CONFIGURACI脫N DE INSTANCIAS
+-- =============================================================================
 local sendError = ReplicatedStorage.Events:WaitForChild("SendAlert")
 local animarCamara = ReplicatedStorage.Events:WaitForChild("cinematic")
 local mostrarGUI = ReplicatedStorage.Events:WaitForChild("MostrarGUI")
@@ -10,61 +16,73 @@ local mostrarGUI = ReplicatedStorage.Events:WaitForChild("MostrarGUI")
 local startPart = game.Workspace:WaitForChild("START", 10)
 local tpPart = game.Workspace:WaitForChild("TP", 10)
 local mapFolder = workspace:WaitForChild("map")
-local barn = mapFolder:WaitForChild("Barn")
+local barn = mapFolder:WaitForChild("Barn") -- Estructura objetivo que los jugadores defienden
 local barnHitbox = barn:WaitForChild("HITBOX")
 local barnHumanoid = barnHitbox:WaitForChild("Humanoid")
 
--- Aseguramos los 150 de vida directamente al iniciar el servidor
+-- Inicializaci贸n forzada de la vida del objetivo del juego
 barnHumanoid.MaxHealth = 150
 barnHumanoid.Health = 150
 
--- Almacenes ordenados para las scoreboards
+-- Inicializaci贸n de Almacenes Ordenados para Tablas de Clasificaci贸n Globales
 local DiasDS = DataStoreService:GetOrderedDataStore("Leaderboard_Dias_v1")
 local RobuxDS = DataStoreService:GetOrderedDataStore("Leaderboard_Robux_v1")
 local TiempoDS = DataStoreService:GetOrderedDataStore("Leaderboard_Tiempo_v1")
 
--- Eventos de votaci髇
+-- Eventos de comunicaci贸n Servidor-Cliente para la fase final del juego
 local VotoEvent = ReplicatedStorage.Events:WaitForChild("VotoPartida")
 local GameOverEvent = ReplicatedStorage.Events:WaitForChild("GameOver")
 
-local RETRY_PLACE = 92213080106736	
-local LOBBY_PLACE = 92388806036847
+-- Identificadores de Universos/Lugares en Roblox (Asset IDs)
+local RETRY_PLACE = 92213080106736	-- ID del mapa de juego (Reiniciar)
+local LOBBY_PLACE = 92388806036847 -- ID del Lobby principal
 
 local juegoIniciado = workspace:WaitForChild("JuegoIniciado")
 local activado = false
 
--- Variables de control para las votaciones
+-- Estructura de datos para el control de la votaci贸n democr谩tica de fin de juego
 local votos = {
-	RETRY = {},
-	LOBBY = {}
+	RETRY = {}, -- Lista de jugadores que quieren reintentar
+	LOBBY = {}  -- Lista de jugadores que quieren ir al lobby
 }
 local votacionActiva = false
-local tiempoRestante = 23
+local tiempoRestante = 23 -- Duraci贸n de la votaci贸n en segundos
 
--- ============================================
--- VARIABLES Y CONFIGURACI覰 DEL DATASTORE
--- ============================================
-local PlayerDataStore = DataStoreService:GetDataStore("PlayerStats_v1")
-local tiempoEntrada = {} 
+-- =============================================================================
+-- VARIABLES Y ALMACENAMIENTO LOCAL DEL DATASTORE
+-- =============================================================================
+local PlayerDataStore = DataStoreService:GetDataStore("PlayerStats_v1") -- Base de datos persistente est谩ndar
+local tiempoEntrada = {} -- Diccionario/Tabla Hash para almacenar el os.time() de ingreso de cada jugador
 
 local diaActualValue = game.Lighting:WaitForChild("Day", 5)
 
--- Tutorial guard (lazy lookup so TutorialHandler always runs first)
+--[[
+    Funci贸n de consulta diferida para verificar si el tutorial est谩 activo.
+    Evita errores de orden de ejecuci贸n si el TutorialHandler no ha cargado.
+]]
 local function isTutorialActive()
 	local ts = ReplicatedStorage:FindFirstChild("TutorialSystem")
 	local ta = ts and ts:FindFirstChild("TutorialActive")
 	return ta and ta.Value == true
 end 
 
--- ============================================
--- FUNCIONES INTERNAS DEL DATASTORE
--- ============================================
+-- =============================================================================
+-- LOG脥STICA DE PERSISTENCIA DE DATOS (DATASTORE CORES)
+-- =============================================================================
+
+--[[
+    Carga el perfil de datos del jugador al entrar al servidor.
+    Si no existen registros previos o la solicitud falla, genera valores iniciales de cero.
+]]
 local function cargarDatos(player)
 	local key = "Player_" .. player.UserId
+	
+	-- Uso de pcall (protected call) para mitigar ca铆das de conexi贸n con los servidores de Roblox
 	local success, data = pcall(function()
 		return PlayerDataStore:GetAsync(key)
 	end)
 
+	-- Creaci贸n de la jerarqu铆a de almacenamiento temporal dentro del Player
 	local statsFolder = Instance.new("Folder")
 	statsFolder.Name = "LeaderstatsData"
 	statsFolder.Parent = player
@@ -81,6 +99,7 @@ local function cargarDatos(player)
 	robuxDonados.Name = "RobuxDonados"
 	robuxDonados.Parent = statsFolder
 
+	-- Asignaci贸n de datos recuperados o por defecto
 	if success and data then
 		tiempoTotal.Value = data.TiempoTotal or 0
 		diaMaximo.Value = data.DiaMaximo or 0
@@ -92,21 +111,24 @@ local function cargarDatos(player)
 	end
 end
 
--- SISTEMA UNIFICADO DE GUARDADO (Local + Scoreboards)
+--[[
+    Guarda el progreso del usuario de forma unificada tanto en el perfil local 
+    como en los OrderedDataStores globales de las scoreboards.
+]]
 local function guardarDatosCompleto(player)
 	if not player:FindFirstChild("LeaderstatsData") then return end
 
 	local key = "Player_" .. player.UserId
 	local stats = player.LeaderstatsData
 
-	-- 1. Calcular tiempo de sesi髇
+	-- C谩lculo del tiempo de juego consumido durante la presente sesi贸n
 	local tiempoSesion = 0
 	if tiempoEntrada[player] then
 		tiempoSesion = os.time() - tiempoEntrada[player]
 	end
 	local tiempoTotalActualizado = stats.TiempoTotal.Value + tiempoSesion
 
-	-- 2. Guardar en el DataStore principal (Progreso del jugador)
+	-- Empaquetamiento de datos para el DataStore principal
 	local dataToSave = {
 		TiempoTotal = tiempoTotalActualizado,
 		DiaMaximo = stats.DiaMaximo.Value,
@@ -121,8 +143,7 @@ local function guardarDatosCompleto(player)
 		warn("No se pudieron guardar los datos locales de " .. player.Name .. ": " .. tostring(err))
 	end
 
-	-- 3. Guardar en los OrderedDataStore (Scoreboards globales)
-	-- CORRECCI覰: Guardamos usando player.UserId de forma num閞ica directa
+	-- Volcado en OrderedDataStores p煤blicos (Usa la ID del jugador de manera num茅rica como clave)
 	local successGlobal, errGlobal = pcall(function()
 		local numericId = player.UserId
 		DiasDS:SetAsync(numericId, stats.DiaMaximo.Value)
@@ -135,45 +156,59 @@ local function guardarDatosCompleto(player)
 	end
 end
 
+--[[
+    Interrumpe los flujos del juego y actualiza los r茅cords personales 
+    de los jugadores al cumplirse la condici贸n de Game Over.
+]]
 local function alTerminarPartida()
 	local diaAlcanzado = diaActualValue and diaActualValue.Value or 1
-	print("a partida ha terminado en el d韆 " .. diaAlcanzado .. "! Guardando datos globales...")
+	print("隆La partida ha terminado en el d铆a " .. diaAlcanzado .. "! Guardando datos globales...")
 
-	-- Apagar el candado del tutorial por completo
+	-- Desactivaci贸n forzada del sistema de tutoriales
 	local ts = ReplicatedStorage:FindFirstChild("TutorialSystem")
 	local ta = ts and ts:FindFirstChild("TutorialActive")
 	if ta then ta.Value = false end
 
+	-- Procesamiento masivo de datos para los jugadores presentes
 	for _, player in pairs(Players:GetPlayers()) do
 		local stats = player:FindFirstChild("LeaderstatsData")
 		if stats then
-			-- Actualizar valores locales en vivo antes de lanzar el guardado masivo
+			-- Comprobaci贸n e inscripci贸n de r茅cord de supervivencia (D铆a M谩ximo)
 			if diaAlcanzado > stats.DiaMaximo.Value then
 				stats.DiaMaximo.Value = diaAlcanzado
 			end
 
-			-- Forzar el volcado completo a todas las bases de datos
+			-- Ejecuci贸n del guardado f铆sico
 			guardarDatosCompleto(player)
 
-			-- Reiniciar el reloj de sesi髇 para evitar duplicar el tiempo si se quedan en el juego
+			-- Resetear la marca temporal para evitar acumulaciones duplicadas futuras
 			tiempoEntrada[player] = os.time()
 		end
 	end
 end
 
--- ============================================
--- FUNCIONES AUXILIRES DE VOTACI覰
--- ============================================
+-- =============================================================================
+-- SISTEMA DE CONTROL DE VOTACIONES Y FLUJO DE TELETRANSPORTE
+-- =============================================================================
+
+--[[
+    Retorna el estado actual del conteo de votos de las opciones disponibles.
+]]
 local function obtenerConteo()
 	return #votos.RETRY, #votos.LOBBY, #Players:GetPlayers()
 end
 
+--[[
+    Eval煤a los resultados de la votaci贸n y segmenta de forma masiva a los 
+    jugadores redirigi茅ndolos al servidor correspondiente usando TeleportAsync.
+]]
 local function ejecutarTeletransporteFinal()
 	if not votacionActiva then return end
 	votacionActiva = false
 
-	print("Fin de la votaci髇 de 23 segundos. Separando grupos...")
+	print("Fin de la votaci贸n de 23 segundos. Separando grupos...")
 
+	-- Segmentaci贸n Grupo A: Volver a jugar
 	if #votos.RETRY > 0 then
 		local success, err = pcall(function()
 			TeleportService:TeleportAsync(RETRY_PLACE, votos.RETRY)
@@ -181,11 +216,13 @@ local function ejecutarTeletransporteFinal()
 		if not success then warn("Error en TP Retry: " .. tostring(err)) end
 	end
 
+	-- Segmentaci贸n Grupo B: Retorno al men煤 principal (Lobby)
 	local grupoLobby = {}
 	for _, p in pairs(votos.LOBBY) do
 		table.insert(grupoLobby, p)
 	end
 
+	-- Jugadores que no votaron (indecisos) son enviados al Lobby por defecto
 	for _, p in pairs(Players:GetPlayers()) do
 		if not table.find(votos.RETRY, p) and not table.find(votos.LOBBY, p) then
 			table.insert(grupoLobby, p)
@@ -200,6 +237,10 @@ local function ejecutarTeletransporteFinal()
 	end
 end
 
+--[[
+    Inicia el conteo regresivo de la votaci贸n de fin de partida en un hilo as铆ncrono
+    e informa constantemente del estado del escrutinio a todos los clientes.
+]]
 local function iniciarCronometroGameOver()
 	if votacionActiva then return end
 	votacionActiva = true
@@ -209,8 +250,9 @@ local function iniciarCronometroGameOver()
 
 	task.spawn(function()
 		local vRetry, vLobby, total = obtenerConteo()
-		VotoEvent:FireAllClients(vRetry, vLobby, total, tiempoRestante)
+		VotoEvent:FireAllClients(vRetry, vLobby, total, tiempoRestante) -- Difusi贸n inicial
 
+		-- Bucle del segundero de votaci贸n
 		while tiempoRestante > 0 and votacionActiva do
 			task.wait(1)
 			tiempoRestante -= 1
@@ -219,31 +261,36 @@ local function iniciarCronometroGameOver()
 			VotoEvent:FireAllClients(currentRetry, currentLobby, currentTotal, tiempoRestante)
 		end
 
+		-- Al agotarse el tiempo, procesar el destino f铆sico
 		if votacionActiva then
 			ejecutarTeletransporteFinal()
 		end
 	end)
 end
 
--- ============================================
--- ESCUCHADORES DE EVENTOS DE RED (VOTOS Y CONEXI覰)
--- ============================================
+-- =============================================================================
+-- ESCUCHADORES DE RED Y GESTI脫N DE CONEXIONES
+-- =============================================================================
+
+-- Registro de entrada del jugador
 Players.PlayerAdded:Connect(function(player)
-	tiempoEntrada[player] = os.time()
+	tiempoEntrada[player] = os.time() -- Estampar hora de llegada
 	cargarDatos(player)
 end)
 
+-- Manejo de salidas del servidor
 Players.PlayerRemoving:Connect(function(player)
-	-- Guardado total e inmediato al desconectarse por cualquier motivo
+	-- Resguardo inmediato de datos para evitar p茅rdidas por desconexi贸n forzada
 	guardarDatosCompleto(player)
-
 	tiempoEntrada[player] = nil
 
+	-- Limpieza de sus registros de votos si estaba participando de una elecci贸n
 	local idxR = table.find(votos.RETRY, player)
 	local idxL = table.find(votos.LOBBY, player)
 	if idxR then table.remove(votos.RETRY, idxR) end
 	if idxL then table.remove(votos.LOBBY, idxL) end
 
+	-- Si una votaci贸n estaba activa, recalcular si los votos restantes hacen un谩nime la decisi贸n
 	if votacionActiva then
 		local vRetry, vLobby, total = obtenerConteo()
 		VotoEvent:FireAllClients(vRetry, vLobby, total, tiempoRestante)
@@ -260,8 +307,10 @@ Players.PlayerRemoving:Connect(function(player)
 	end
 end)
 
+-- Procesamiento del voto entrante enviado por el cliente
 VotoEvent.OnServerEvent:Connect(function(player, tipoVoto)
 	if not votacionActiva then return end
+	-- Antifraude elemental: Evitar que un jugador vote m谩s de una vez
 	if table.find(votos.RETRY, player) or table.find(votos.LOBBY, player) then return end
 
 	if tipoVoto == "RETRY" then
@@ -270,13 +319,16 @@ VotoEvent.OnServerEvent:Connect(function(player, tipoVoto)
 		table.insert(votos.LOBBY, player)
 	end
 
+	-- Replicar actualizaci贸n de votos en tiempo real a las pantallas de todos los usuarios
 	local vRetry, vLobby, total = obtenerConteo()
 	VotoEvent:FireAllClients(vRetry, vLobby, total, tiempoRestante)
 end)
 
--- ============================================
--- COMPORTAMIENTO DEL BARN (VIDA Y DESTRUCCI覰)
--- ============================================
+-- =============================================================================
+-- MANEJO DE SALUD, EFECTOS Y DESTRUCCI脫N DEL OBJETIVO ("BARN")
+-- =============================================================================
+
+-- Generaci贸n din谩mica de un efecto visual de contorno (Highlight) para indicar da帽o en la base
 local barnHighlight = Instance.new("Highlight")
 barnHighlight.FillColor = Color3.fromRGB(220, 30, 30)
 barnHighlight.FillTransparency = 0.5
@@ -288,57 +340,68 @@ barnHighlight.Parent = barn
 
 local barnMuerto = false
 local lastBarnHP = barnHumanoid.Health
+
+-- Evento A: Destello de alerta visual cuando la base recibe impactos de enemigos
 barnHumanoid.HealthChanged:Connect(function(newHP)
 	if newHP < lastBarnHP and not barnMuerto then
 		barnHighlight.Enabled = true
-		task.delay(0.3, function() barnHighlight.Enabled = false end)
+		task.delay(0.3, function() barnHighlight.Enabled = false end) -- Apagado tras 0.3 segundos
 	end
 	lastBarnHP = newHP
 end)
 
+-- Evento B: L贸gica de destrucci贸n total al agotarse los puntos de salud de la estructura
 barnHumanoid.HealthChanged:Connect(function(vida)
 	if vida <= 0 and not barnMuerto and juegoIniciado.Value == true then
 		barnMuerto = true
-		juegoIniciado.Value = false
+		juegoIniciado.Value = false -- Frenar el bucle del generador de zombis
 
-		-- Laugh sound on barn death
+		-- Creaci贸n din谩mica del disparador de efectos de audio ambientales de derrota
 		local playSoundRE = game:GetService("ReplicatedStorage").Events:FindFirstChild("PlaySoundEvent")
 		if not playSoundRE then
 			playSoundRE = Instance.new("RemoteEvent")
 			playSoundRE.Name = "PlaySoundEvent"
 			playSoundRE.Parent = game:GetService("ReplicatedStorage").Events
 		end
-		playSoundRE:FireAllClients("rbxassetid://139944924921354", 1)
+		playSoundRE:FireAllClients("rbxassetid://139944924921354", 1) -- Audio de risa malvada/derrota
 
-		-- Destrucci髇 del Barn
+		-- Animaci贸n de colapso f铆sico mediante desanclaje de piezas y micro-explosiones est茅ticas
 		task.spawn(function()
 			for _, part in ipairs(barn:GetDescendants()) do
 				if part:IsA("BasePart") then
-					part.Anchored = false
+					part.Anchored = false -- Activa la gravedad en las piezas
 					local ex = Instance.new("Explosion")
 					ex.Position = part.Position
-					ex.BlastRadius = 0
+					ex.BlastRadius = 0    -- Fuerza cero para evitar que salgan volando de forma ca贸tica
 					ex.BlastPressure = 0
 					ex.Parent = workspace
 				end
 			end
 			task.wait(3)
-			barn:Destroy()
+			barn:Destroy() -- Liberaci贸n de recursos del mapa colapsado
 		end) 
 
-		alTerminarPartida()
+		alTerminarPartida() -- Ejecuci贸n de guardados masivos en DataStores
 
 		task.wait(2)
 
+		-- Invocar las interfaces visuales de Game Over e iniciar la fase de escrutinio
 		GameOverEvent:FireAllClients()
 		iniciarCronometroGameOver()
 	end
 end)
 
--- RED DE SEGURIDAD ABSOLUTA: Cierre inesperado del servidor o crash
+-- =============================================================================
+-- RED DE SEGURIDAD ABSOLUTA (CIERRE IMPREVISTO)
+-- =============================================================================
+--[[
+    Este evento intercepta el proceso de apagado del servidor (crash, migraci贸n de versi贸n
+    o salida de todos los usuarios) reteniendo la instancia 2 segundos extra en memoria.
+    Esto previene la p茅rdida y corrupci贸n de inventarios y r茅cords.
+]]
 game:BindToClose(function()
 	for _, player in pairs(Players:GetPlayers()) do
 		guardarDatosCompleto(player)
 	end
-	task.wait(2) -- Tiempo de gracia para solicitudes HTTP salientes de Roblox
+	task.wait(2) -- Ventana de tiempo cr铆tica para que terminen de enviarse los paquetes HTTP a la API de Roblox
 end)
